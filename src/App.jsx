@@ -1,19 +1,22 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import {
-  Activity, ArrowDownToLine, ArrowUpRight, BarChart3, CalendarDays,
+  Activity, ArrowDownToLine, ArrowUpRight, BarChart3, Building, Building2, CalendarDays,
   Check, ChevronDown, ChevronRight, CircleDollarSign, ClipboardList,
   Clock3, Construction, Download, Eye, FileText, Filter, HardHat, LayoutDashboard,
-  Menu, Pencil, PieChart as PieIcon, Plus, Search, Settings, Trash2, TrendingUp, Users,
+  LogOut, Menu, Moon, Pencil, PieChart as PieIcon, Plus, Search, Settings, Sparkles, Sun, Trash2, TrendingUp, Users,
   Wallet, X
 } from 'lucide-react';
 import './App.css';
+import AuthModal, { getCurrentUser, setCurrentUser } from './AuthModal.jsx';
 
 /* ── Keys for localStorage ── */
 const STORAGE_KEY = 'buildpay-payments-v1';
 const NAMES_KEY = 'buildpay-names-v1';
 const WORKTYPES_KEY = 'buildpay-worktypes-v1';
 const BUDGET_KEY = 'buildpay-budget-v1';
+
+const THEME_KEY = 'buildpay-theme-mode-v1';
 
 /* ── Date / Time helpers ── */
 const today = () => {
@@ -28,17 +31,63 @@ const money = (n) => new Intl.NumberFormat('en-IN', { style: 'currency', currenc
 const formatDate = (date) => date ? new Date(`${date}T00:00:00`).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
 const formatDateTime = (p) => `${formatDate(p.date)}, ${p.time || '—'}`;
 
+/* ── Relative Time calculation ("seconds ago", "hours ago", "days ago", "weeks ago") ── */
+function formatRelativeTime(dateInput) {
+  if (!dateInput) return 'Not yet updated';
+  const past = new Date(dateInput).getTime();
+  if (isNaN(past)) return 'Recently';
+  const now = Date.now();
+  const diffSec = Math.max(0, Math.floor((now - past) / 1000));
+
+  if (diffSec < 5) return 'Just now';
+  if (diffSec < 60) return `${diffSec} second${diffSec === 1 ? '' : 's'} ago`;
+  
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} minute${diffMin === 1 ? '' : 's'} ago`;
+
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour} hour${diffHour === 1 ? '' : 's'} ago`;
+
+  const diffDays = Math.floor(diffHour / 24);
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) return `${diffDays} days ago`;
+
+  const diffWeeks = Math.floor(diffDays / 7);
+  if (diffWeeks < 5) return `${diffWeeks} week${diffWeeks === 1 ? '' : 's'} ago`;
+
+  const diffMonths = Math.floor(diffDays / 30);
+  if (diffMonths < 12) return `${diffMonths} month${diffMonths === 1 ? '' : 's'} ago`;
+
+  const diffYears = Math.floor(diffDays / 365);
+  return `${diffYears} year${diffYears === 1 ? '' : 's'} ago`;
+}
+
+function formatFullTimestamp(dateInput) {
+  if (!dateInput) return '—';
+  const d = new Date(dateInput);
+  if (isNaN(d.getTime())) return String(dateInput);
+  return d.toLocaleString('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true
+  });
+}
+
 /* ── Defaults ── */
 const DEFAULT_NAMES = ['Santosh', 'Kedar', 'Yallappa', 'Shivappa', 'Ramesh'];
 const DEFAULT_WORKTYPES = ['BS', 'Sai', 'Labour', 'Carpenter', 'Survey'];
 const methods = ['Cash', 'UPI', 'Cheque'];
 
+const nowIso = new Date().toISOString();
+const hourAgoIso = new Date(Date.now() - 3600 * 1000 * 2).toISOString();
+const dayAgoIso = new Date(Date.now() - 86400 * 1000 * 1).toISOString();
+const weekAgoIso = new Date(Date.now() - 86400 * 1000 * 5).toISOString();
+
 const initialPayments = [
-  { id: 'PAY-0001', name: 'Santosh', amount: 2500, date: '2026-10-15', time: '10:30', workType: 'BS', method: 'Cash', remark: 'Foundation work', status: 'Paid' },
-  { id: 'PAY-0002', name: 'Kedar', amount: 8000, date: '2026-10-15', time: '11:45', workType: 'Sai', method: 'UPI', remark: 'Sai work materials', status: 'Paid' },
-  { id: 'PAY-0003', name: 'Yallappa', amount: 3000, date: '2026-10-15', time: '14:15', workType: 'Labour', method: 'Cash', remark: 'Daily labour wages', status: 'Pending' },
-  { id: 'PAY-0004', name: 'Shivappa', amount: 15000, date: '2026-10-14', time: '16:20', workType: 'Carpenter', method: 'Cheque', remark: 'Door frames (Chq #582910)', status: 'Paid' },
-  { id: 'PAY-0005', name: 'Ramesh', amount: 12000, date: '2026-10-13', time: '11:10', workType: 'Survey', method: 'Cheque', remark: 'Site survey charges (Chq #61092)', status: 'Pending' },
+  { id: 'PAY-0001', name: 'Santosh', amount: 2500, date: '2026-10-15', time: '10:30', workType: 'BS', method: 'Cash', remark: 'Foundation work', status: 'Paid', updatedAt: nowIso },
+  { id: 'PAY-0002', name: 'Kedar', amount: 8000, date: '2026-10-15', time: '11:45', workType: 'Sai', method: 'UPI', remark: 'Sai work materials', status: 'Paid', updatedAt: hourAgoIso },
+  { id: 'PAY-0003', name: 'Yallappa', amount: 3000, date: '2026-10-15', time: '14:15', workType: 'Labour', method: 'Cash', remark: 'Daily labour wages', status: 'Pending', updatedAt: dayAgoIso },
+  { id: 'PAY-0004', name: 'Shivappa', amount: 15000, date: '2026-10-14', time: '16:20', workType: 'Carpenter', method: 'Cheque', remark: 'Door frames (Chq #582910)', status: 'Paid', updatedAt: weekAgoIso },
+  { id: 'PAY-0005', name: 'Ramesh', amount: 12000, date: '2026-10-13', time: '11:10', workType: 'Survey', method: 'Cheque', remark: 'Site survey charges (Chq #61092)', status: 'Pending', updatedAt: weekAgoIso },
 ];
 
 /* ── Helpers ── */
@@ -89,6 +138,37 @@ function App() {
   const [editingBudgetInline, setEditingBudgetInline] = useState(false);
   const [inlineBudgetVal, setInlineBudgetVal] = useState(String(projectBudget));
   const [budgetInput, setBudgetInput] = useState(String(projectBudget));
+  const [currentUser, setCurrentUserState] = useState(() => getCurrentUser());
+  const [showAuthModal, setShowAuthModal] = useState(() => !getCurrentUser());
+  const [theme, setTheme] = useState(() => {
+    try { return localStorage.getItem(THEME_KEY) || 'light'; }
+    catch { return 'light'; }
+  });
+
+  const toggleTheme = () => {
+    const nextTheme = theme === 'light' ? 'dark' : 'light';
+    setTheme(nextTheme);
+    try { localStorage.setItem(THEME_KEY, nextTheme); } catch {}
+    setToast(`Theme switched to ${nextTheme === 'dark' ? 'Dark Mode 🌙' : 'Light Mode ☀️'}`);
+  };
+
+  // Sync theme attribute on document root
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
+
+  const handleLoginSuccess = (user) => {
+    setCurrentUserState(user);
+    setShowAuthModal(false);
+    setToast(`Signed in as ${user.fullName || user.username}`);
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    setCurrentUserState(null);
+    setShowAuthModal(true);
+    setToast('Logged out successfully.');
+  };
 
   /* ── Persist ── */
   useEffect(() => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(payments)); } catch {} }, [payments]);
@@ -103,7 +183,7 @@ function App() {
       if (p.id === id) {
         const nextStatus = p.status === 'Paid' ? 'Pending' : 'Paid';
         setToast(`${p.id} (${p.name}) marked as ${nextStatus}.`);
-        return { ...p, status: nextStatus };
+        return { ...p, status: nextStatus, updatedAt: new Date().toISOString() };
       }
       return p;
     }));
@@ -215,7 +295,15 @@ function App() {
     if (!form.amount || !Number.isFinite(Number(form.amount)) || Number(form.amount) <= 0) return setFormError('Enter an amount greater than zero.');
     if (!form.date) return setFormError('Choose a payment date.');
     if (!form.workType.trim()) return setFormError('Select a work type.');
-    const clean = { ...form, name: form.name.trim(), amount: Number(form.amount), remark: form.remark.trim(), workType: form.workType.trim() };
+    const nowTimestamp = new Date().toISOString();
+    const clean = {
+      ...form,
+      name: form.name.trim(),
+      amount: Number(form.amount),
+      remark: form.remark.trim(),
+      workType: form.workType.trim(),
+      updatedAt: nowTimestamp
+    };
     if (editingId) {
       setPayments(prev => prev.map(p => p.id === editingId ? { ...clean, id: editingId } : p));
       setToast('Payment updated successfully.');
@@ -243,6 +331,7 @@ function App() {
         'Amount (₹)': p.amount,
         'Payment Mode': p.method,
         'Status': p.status,
+        'Last Updated': formatFullTimestamp(p.updatedAt || `${p.date}T${p.time || '10:00'}:00`),
         'Remark': p.remark,
       }));
       const wsPayments = XLSX.utils.json_to_sheet(paymentRows);
@@ -348,8 +437,17 @@ function App() {
       {/* ── Sidebar ── */}
       <aside className={`sidebar ${mobileNavOpen ? 'sidebar-open' : ''}`}>
         <div className="brand">
-          <div className="brand-mark"><Construction size={24} strokeWidth={2.5} /></div>
-          <div><div className="brand-name">BuildPay</div><div className="brand-tagline">Manage · Track · Grow</div></div>
+          <div className="brand-mark" title="Bhandurge Developers · Construction Management">
+            <Building2 size={22} strokeWidth={2.4} className="brand-building-icon" />
+            <span className="brand-emoji-badge">🏗️</span>
+          </div>
+          <div>
+            <div className="brand-name">
+              <span>BuildPay</span>
+              <span className="builder-pill">🏢 BUILDER</span>
+            </div>
+            <div className="brand-tagline">Bhandurge Developers · Finance</div>
+          </div>
           <button className="icon-button mobile-close" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)}><X size={18}/></button>
         </div>
         <div className="nav-caption">WORKSPACE</div>
@@ -374,11 +472,54 @@ function App() {
           <button className="icon-button menu-toggle" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}><Menu size={21}/></button>
           <div className="global-search"><Search size={18}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search by name, work type, remark or payment ID..." aria-label="Search payments"/>{query && <button onClick={() => setQuery('')} aria-label="Clear search"><X size={15}/></button>}</div>
           <div className="topbar-right">
+            {/* Theme Toggle Button */}
+            <button
+              className="theme-toggle-btn"
+              onClick={toggleTheme}
+              title={`Switch to ${theme === 'light' ? 'Dark' : 'Light'} Mode`}
+              aria-label={`Switch to ${theme === 'light' ? 'Dark' : 'Light'} Mode`}
+            >
+              {theme === 'light' ? (
+                <>
+                  <Moon size={16} className="theme-icon moon" />
+                  <span className="theme-toggle-label">Dark</span>
+                </>
+              ) : (
+                <>
+                  <Sun size={16} className="theme-icon sun" />
+                  <span className="theme-toggle-label">Light</span>
+                </>
+              )}
+            </button>
             <button className="settings-quick-btn" title="Open Settings" onClick={() => setSettingsOpen(true)}><Settings size={16}/><span>Settings</span></button>
             <span className="local-badge"><span className="status-dot"></span> Local data</span>
             <div className="topbar-divider"></div>
-            <div className="avatar">BP</div>
-            <div className="profile-copy"><strong>Builder Admin</strong><span>Administrator</span></div>
+            {currentUser ? (
+              <div className="user-profile-widget">
+                <div className="avatar" title={currentUser.fullName || currentUser.username}>
+                  {initials(currentUser.fullName || currentUser.username)}
+                </div>
+                <div className="profile-copy">
+                  <strong>{currentUser.fullName || currentUser.username}</strong>
+                  <span>{currentUser.role || 'Admin'} · {currentUser.phone || currentUser.username}</span>
+                </div>
+                <button
+                  className="icon-button logout-btn"
+                  title="Log out of Admin Portal"
+                  aria-label="Log out"
+                  onClick={handleLogout}
+                >
+                  <LogOut size={16} />
+                </button>
+              </div>
+            ) : (
+              <button
+                className="btn btn-primary login-top-btn"
+                onClick={() => setShowAuthModal(true)}
+              >
+                Sign In
+              </button>
+            )}
           </div>
         </header>
 
@@ -387,8 +528,38 @@ function App() {
           <div className="page-heading">
             <div>
               <div className="eyebrow">CONSTRUCTION FINANCE</div>
-              <h1>{activePage}</h1>
-              <p>{activePage === 'Dashboard' ? 'Overview of your construction payments, status & balance (user-editable).' : activePage === 'Payment Register' ? 'Search, review, edit, delete, and toggle status directly with checkboxes.' : activePage === 'People' ? 'Person-wise payment summary (Santosh, Kedar, Yallappa, etc).' : activePage === 'Reports' ? 'Review summaries and export all data directly to Excel.' : 'Overview'}</p>
+              {/* Animated Welcome Admin Banner */}
+              <div className="welcome-admin-banner">
+                <div className="welcome-badge">
+                  <span className="building-emoji-lead">🏗️</span>
+                  <Building2 size={14} className="building-lucide-icon" />
+                  <span>BHANDURGE DEVELOPERS & BUILDERS</span>
+                  <Sparkles size={13} className="sparkle-icon" />
+                </div>
+                <h1 className="welcome-admin-title">
+                  Welcome, <span className="brand-gradient-text shimmer-text">Bhandurge Developers</span> <span className="title-building-emoji" title="Builder & Construction">🏢</span>
+                </h1>
+                <p className="welcome-admin-sub">
+                  <span className="sub-builder-tag">👷 Site Admin</span> {currentUser ? `${currentUser.fullName || currentUser.username}` : 'Administrator'} · Construction Site Finance, Payment Tracking & Contractor Accounts
+                </p>
+              </div>
+              <p className="page-desc-text">{activePage === 'Dashboard' ? 'Overview of your construction payments, status & balance (user-editable).' : activePage === 'Payment Register' ? 'Search, review, edit, delete, and toggle status directly with checkboxes.' : activePage === 'People' ? 'Person-wise payment summary (Santosh, Kedar, Yallappa, etc).' : activePage === 'Reports' ? 'Review summaries and export all data directly to Excel.' : 'Overview'}</p>
+              {payments.length > 0 && (() => {
+                const sortedByUpdate = [...payments].sort((a, b) => {
+                  const ta = new Date(a.updatedAt || `${a.date}T${a.time || '10:00'}:00`).getTime();
+                  const tb = new Date(b.updatedAt || `${b.date}T${b.time || '10:00'}:00`).getTime();
+                  return tb - ta;
+                });
+                const newest = sortedByUpdate[0];
+                if (!newest) return null;
+                const updatedIso = newest.updatedAt || `${newest.date}T${newest.time || '10:00'}:00`;
+                return (
+                  <div className="last-sync-banner" title={`Last updated: ${formatFullTimestamp(updatedIso)}`}>
+                    <Clock3 size={13} className="sync-clock" />
+                    <span>Latest update: <strong>{newest.id} ({newest.name} · {money(newest.amount)})</strong> was updated <strong>{formatRelativeTime(updatedIso)}</strong></span>
+                  </div>
+                );
+              })()}
             </div>
             <div className="heading-actions">
               <label className="date-select"><CalendarDays size={16}/><select value={dateFilter} onChange={e => setDateFilter(e.target.value)} aria-label="Date range"><option>This month</option><option>Today</option><option>This year</option><option>All time</option></select><ChevronDown size={15}/></label>
@@ -575,7 +746,13 @@ function App() {
                           <div className="recent-info">
                             <strong>{p.name}</strong>
                             <span>{p.workType} · {p.remark || '—'}</span>
-                            <small>{formatDateTime(p)}</small>
+                            <div className="recent-meta-row">
+                              <small>{formatDateTime(p)}</small>
+                              <span className="recent-updated-chip" title={`Last updated: ${formatFullTimestamp(p.updatedAt || `${p.date}T${p.time || '10:00'}:00`)}`}>
+                                <Clock3 size={10} />
+                                <span>Updated {formatRelativeTime(p.updatedAt || `${p.date}T${p.time || '10:00'}:00`)}</span>
+                              </span>
+                            </div>
                           </div>
                           <div className="recent-amount">
                             <strong>{money(p.amount)}</strong>
@@ -623,44 +800,56 @@ function App() {
                         <th>Amount</th>
                         <th>Mode</th>
                         <th style={{ minWidth: '120px' }}>Status (Checkbox)</th>
+                        <th>Last Updated</th>
                         <th>Remark</th>
                         <th className="actions-heading">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {visiblePayments.map(p => (
-                        <tr key={p.id}>
-                          <td><span className="payment-id">{p.id}</span></td>
-                          <td><span className="date-cell">{formatDate(p.date)}</span><small className="time-cell">{p.time}</small></td>
-                          <td><div className="table-person"><div className="person-avatar small">{initials(p.name)}</div><strong>{p.name}</strong></div></td>
-                          <td><span className="worktype-badge">{p.workType}</span></td>
-                          <td><strong className="amount-cell">{money(p.amount)}</strong></td>
-                          <td><MethodBadge method={p.method}/></td>
-                          <td>
-                            <label className="status-toggle-wrap" title={`Click to mark as ${p.status === 'Paid' ? 'Pending' : 'Paid'}`}>
-                              <input
-                                type="checkbox"
-                                className="status-check"
-                                checked={p.status === 'Paid'}
-                                onChange={() => togglePaymentStatus(p.id)}
-                              />
-                              <span className={`status-badge interactive ${p.status.toLowerCase()}`}>
-                                {p.status === 'Paid' ? <Check size={11} strokeWidth={3}/> : <Clock3 size={11}/>}
-                                {p.status}
+                      {visiblePayments.map(p => {
+                        const updatedIso = p.updatedAt || `${p.date}T${p.time || '10:00'}:00`;
+                        const relTime = formatRelativeTime(updatedIso);
+                        const fullTime = formatFullTimestamp(updatedIso);
+                        return (
+                          <tr key={p.id}>
+                            <td><span className="payment-id">{p.id}</span></td>
+                            <td><span className="date-cell">{formatDate(p.date)}</span><small className="time-cell">{p.time}</small></td>
+                            <td><div className="table-person"><div className="person-avatar small">{initials(p.name)}</div><strong>{p.name}</strong></div></td>
+                            <td><span className="worktype-badge">{p.workType}</span></td>
+                            <td><strong className="amount-cell">{money(p.amount)}</strong></td>
+                            <td><MethodBadge method={p.method}/></td>
+                            <td>
+                              <label className="status-toggle-wrap" title={`Click to mark as ${p.status === 'Paid' ? 'Pending' : 'Paid'}`}>
+                                <input
+                                  type="checkbox"
+                                  className="status-check"
+                                  checked={p.status === 'Paid'}
+                                  onChange={() => togglePaymentStatus(p.id)}
+                                />
+                                <span className={`status-badge interactive ${p.status.toLowerCase()}`}>
+                                  {p.status === 'Paid' ? <Check size={11} strokeWidth={3}/> : <Clock3 size={11}/>}
+                                  {p.status}
+                                </span>
+                              </label>
+                            </td>
+                            <td>
+                              <span className="updated-timestamp-pill" title={`Updated on: ${fullTime}`}>
+                                <Clock3 size={11} />
+                                <span>{relTime}</span>
                               </span>
-                            </label>
-                          </td>
-                          <td><span className="purpose-cell">{p.remark || '—'}</span></td>
-                          <td>
-                            <div className="row-actions">
-                              <button className="mini-icon" title="View details" onClick={() => setViewPayment(p)}><Eye size={15}/></button>
-                              <button className="mini-icon" title="Edit payment" onClick={() => openEdit(p)}><Pencil size={15}/></button>
-                              <button className="mini-icon danger" title="Delete payment" onClick={() => setDeleteTarget(p)}><Trash2 size={15}/></button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                      {!visiblePayments.length && <tr><td colSpan="9"><EmptyState text="No payments match your search or filters." actionLabel="Add a payment" onAction={openAdd}/></td></tr>}
+                            </td>
+                            <td><span className="purpose-cell">{p.remark || '—'}</span></td>
+                            <td>
+                              <div className="row-actions">
+                                <button className="mini-icon" title="View details" onClick={() => setViewPayment(p)}><Eye size={15}/></button>
+                                <button className="mini-icon" title="Edit payment" onClick={() => openEdit(p)}><Pencil size={15}/></button>
+                                <button className="mini-icon danger" title="Delete payment" onClick={() => setDeleteTarget(p)}><Trash2 size={15}/></button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {!visiblePayments.length && <tr><td colSpan="10"><EmptyState text="No payments match your search or filters." actionLabel="Add a payment" onAction={openAdd}/></td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -697,6 +886,7 @@ function App() {
       {viewPayment && <ViewModal payment={viewPayment} onClose={() => setViewPayment(null)} onEdit={() => { setViewPayment(null); openEdit(viewPayment); }}/>}
       {deleteTarget && <ConfirmModal payment={deleteTarget} onCancel={() => setDeleteTarget(null)} onConfirm={confirmDelete}/>}
       {settingsOpen && <SettingsModal names={names} workTypes={workTypes} newName={newName} setNewName={setNewName} addName={addName} removeName={removeName} newWorkType={newWorkType} setNewWorkType={setNewWorkType} addWorkType={addWorkType} removeWorkType={removeWorkType} budgetInput={budgetInput} setBudgetInput={setBudgetInput} saveBudget={saveBudget} onClose={() => setSettingsOpen(false)} />}
+      {showAuthModal && <AuthModal onLoginSuccess={handleLoginSuccess} />}
       {toast && <div className="toast"><span className="toast-check"><Check size={16}/></span>{toast}<button onClick={() => setToast('')} aria-label="Dismiss notification"><X size={15}/></button></div>}
     </div>
   );
@@ -1066,7 +1256,18 @@ function PaymentModal({ form, updateForm, onSubmit, onClose, editing, error, nam
 
 /* ── View Modal ── */
 function ViewModal({ payment: p, onClose, onEdit }) {
-  const items = [['Payment ID', p.id], ['Name', p.name], ['Work Type', p.workType], ['Amount', money(p.amount)], ['Date & time', formatDateTime(p)], ['Payment Mode', p.method], ['Status', p.status], ['Remark', p.remark || 'No remark']];
+  const updatedIso = p.updatedAt || `${p.date}T${p.time || '10:00'}:00`;
+  const items = [
+    ['Payment ID', p.id],
+    ['Name', p.name],
+    ['Work Type', p.workType],
+    ['Amount', money(p.amount)],
+    ['Date & time', formatDateTime(p)],
+    ['Payment Mode', p.method],
+    ['Status', p.status],
+    ['Last Updated', `${formatRelativeTime(updatedIso)} (${formatFullTimestamp(updatedIso)})`],
+    ['Remark', p.remark || 'No remark']
+  ];
   return (
     <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
       <section className="modal-card detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title">
