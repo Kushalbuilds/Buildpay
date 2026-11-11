@@ -3,12 +3,13 @@ import * as XLSX from 'xlsx';
 import {
   Activity, ArrowDownToLine, ArrowUpRight, BarChart3, Building, Building2, CalendarDays,
   Check, ChevronDown, ChevronRight, CircleDollarSign, ClipboardList,
-  Clock3, Construction, Download, Eye, FileText, Filter, HardHat, LayoutDashboard,
+  Clock3, Cloud, Construction, Download, Eye, FileText, Filter, HardHat, LayoutDashboard,
   LogOut, Menu, Moon, Pencil, PieChart as PieIcon, Plus, Search, Settings, Sparkles, Sun, Trash2, TrendingUp, Users,
   Wallet, X
 } from 'lucide-react';
 import './App.css';
 import AuthModal, { getCurrentUser, setCurrentUser } from './AuthModal.jsx';
+import { subscribeToCloudData, saveToCloud } from './firestoreSync.js';
 
 /* ── Keys for localStorage ── */
 const STORAGE_KEY = 'buildpay-payments-v1';
@@ -17,6 +18,19 @@ const WORKTYPES_KEY = 'buildpay-worktypes-v1';
 const BUDGET_KEY = 'buildpay-budget-v1';
 
 const THEME_KEY = 'buildpay-theme-mode-v1';
+const FIRMS_KEY = 'buildpay-firms-v1';
+
+/* ── Default Firms ── */
+const DEFAULT_FIRMS = [
+  { id: 'FIRM-001', name: 'Bhandurge Constructions', incoming: [], outgoing: [] },
+  { id: 'FIRM-002', name: 'Bhandurge Ventures', incoming: [], outgoing: [] },
+  { id: 'FIRM-003', name: 'Gurudarshini Builders', incoming: [], outgoing: [] },
+  { id: 'FIRM-004', name: 'Rex Constructions', incoming: [], outgoing: [] },
+  { id: 'FIRM-005', name: 'Rex Builders & Developers', incoming: [], outgoing: [] },
+  { id: 'FIRM-006', name: 'Shri Sai Builders & Developers', incoming: [], outgoing: [] },
+  { id: 'FIRM-007', name: 'Shri Adishakti Constructions', incoming: [], outgoing: [] },
+  { id: 'FIRM-008', name: 'K.B.C Arjun Empire Kalyan Sangha', incoming: [], outgoing: [] },
+];
 
 /* ── Date / Time helpers ── */
 const today = () => {
@@ -145,6 +159,23 @@ function App() {
     catch { return 'light'; }
   });
 
+  /* ── Firms State ── */
+  const [firms, setFirms] = useState(() => readStorage(FIRMS_KEY, DEFAULT_FIRMS));
+  const [firmModalOpen, setFirmModalOpen] = useState(false);
+  const [firmModalType, setFirmModalType] = useState('incoming'); // 'incoming' | 'outgoing'
+  const [firmModalIdx, setFirmModalIdx] = useState(null);
+  const [firmTxForm, setFirmTxForm] = useState({ amount: '', date: today(), time: nowTime(), remark: '', method: 'Cash', paidTo: '' });
+  const [editingTxId, setEditingTxId] = useState(null); // null when adding new, string when editing existing tx
+  const [addFirmModalOpen, setAddFirmModalOpen] = useState(false);
+  const [newFirmName, setNewFirmName] = useState('');
+  const [expandedFirmIdx, setExpandedFirmIdx] = useState(null);
+  const [viewFirmIdx, setViewFirmIdx] = useState(null);
+  const [editFirmIdx, setEditFirmIdx] = useState(null);
+  const [editFirmName, setEditFirmName] = useState('');
+  const [deleteFirmTarget, setDeleteFirmTarget] = useState(null);
+  const [cloudStatus, setCloudStatus] = useState('connecting'); // 'connecting' | 'synced' | 'local'
+  const isInitialCloudLoad = React.useRef(true);
+
   const toggleTheme = () => {
     const nextTheme = theme === 'light' ? 'dark' : 'light';
     setTheme(nextTheme);
@@ -170,11 +201,44 @@ function App() {
     setToast('Logged out successfully.');
   };
 
-  /* ── Persist ── */
+  /* ── Cloud Sync (Firebase Firestore) ── */
+  useEffect(() => {
+    const unsubscribe = subscribeToCloudData((cloudData) => {
+      if (cloudData) {
+        if (Array.isArray(cloudData.payments)) setPayments(cloudData.payments);
+        if (Array.isArray(cloudData.names)) setNames(cloudData.names);
+        if (Array.isArray(cloudData.workTypes)) setWorkTypes(cloudData.workTypes);
+        if (typeof cloudData.projectBudget === 'number') setProjectBudget(cloudData.projectBudget);
+        if (Array.isArray(cloudData.firms)) setFirms(cloudData.firms);
+        setCloudStatus('synced');
+      } else {
+        // If document doesn't exist yet, seed initial local data to cloud
+        saveToCloud({ payments, names, workTypes, projectBudget, firms });
+        setCloudStatus('synced');
+      }
+      isInitialCloudLoad.current = false;
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Sync state changes up to Firestore
+  useEffect(() => {
+    if (isInitialCloudLoad.current) return;
+    const timer = setTimeout(() => {
+      saveToCloud({ payments, names, workTypes, projectBudget, firms })
+        .then(() => setCloudStatus('synced'))
+        .catch(() => setCloudStatus('local'));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [payments, names, workTypes, projectBudget, firms]);
+
+  /* ── Persist (Local Backup) ── */
   useEffect(() => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(payments)); } catch {} }, [payments]);
   useEffect(() => { try { localStorage.setItem(NAMES_KEY, JSON.stringify(names)); } catch {} }, [names]);
   useEffect(() => { try { localStorage.setItem(WORKTYPES_KEY, JSON.stringify(workTypes)); } catch {} }, [workTypes]);
   useEffect(() => { try { localStorage.setItem(BUDGET_KEY, JSON.stringify(projectBudget)); } catch {} }, [projectBudget]);
+  useEffect(() => { try { localStorage.setItem(FIRMS_KEY, JSON.stringify(firms)); } catch {} }, [firms]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 3000); return () => clearTimeout(t); }, [toast]);
 
   /* ── Status Checkbox Toggle ── */
@@ -233,9 +297,13 @@ function App() {
     }).reduce((s, p) => s + Number(p.amount || 0), 0)
   })), [filteredByDate]);
 
-  /* ── Person-wise totals ── */
+  /* ── Person-wise totals (combines payments & all known names) ── */
   const personTotals = useMemo(() => {
     const map = {};
+    names.forEach(n => {
+      const key = n.trim();
+      if (key && !map[key]) map[key] = { name: key, paid: 0, pending: 0, count: 0 };
+    });
     payments.forEach(p => {
       const key = p.name.trim();
       if (!map[key]) map[key] = { name: key, paid: 0, pending: 0, count: 0 };
@@ -244,7 +312,7 @@ function App() {
       else map[key].pending += Number(p.amount || 0);
     });
     return Object.values(map).sort((a, b) => (b.paid + b.pending) - (a.paid + a.pending));
-  }, [payments]);
+  }, [payments, names]);
 
   /* ── Chart Mode State & Data ── */
   const [barMode, setBarMode] = useState('workType'); // 'workType' | 'person'
@@ -414,11 +482,127 @@ function App() {
     setToast('Project budget updated successfully.');
   }
 
+  /* ── Firms helpers ── */
+  function openFirmTxModal(idx, type, existingTx = null) {
+    setFirmModalIdx(idx);
+    setFirmModalType(type);
+    if (existingTx) {
+      setEditingTxId(existingTx.id);
+      setFirmTxForm({
+        amount: String(existingTx.amount || ''),
+        date: existingTx.date || today(),
+        time: existingTx.time || nowTime(),
+        remark: existingTx.remark || '',
+        method: existingTx.method || 'Cash',
+        paidTo: existingTx.paidTo || ''
+      });
+    } else {
+      setEditingTxId(null);
+      setFirmTxForm({ amount: '', date: today(), time: nowTime(), remark: '', method: 'Cash', paidTo: '' });
+    }
+    setFirmModalOpen(true);
+  }
+  function saveFirmTx(e) {
+    e.preventDefault();
+    if (!firmTxForm.amount || Number(firmTxForm.amount) <= 0) return;
+    const cleanAmount = Number(firmTxForm.amount);
+    const cleanRemark = (firmTxForm.remark || '').trim();
+    const cleanPaidTo = (firmTxForm.paidTo || '').trim();
+
+    if (editingTxId) {
+      setFirms(prev => prev.map((f, i) => {
+        if (i !== firmModalIdx) return f;
+        const updateList = (list) => list.map(t => t.id === editingTxId ? {
+          ...t,
+          amount: cleanAmount,
+          date: firmTxForm.date,
+          time: firmTxForm.time,
+          method: firmTxForm.method,
+          paidTo: cleanPaidTo,
+          remark: cleanRemark,
+          updatedAt: new Date().toISOString()
+        } : t);
+
+        return firmModalType === 'incoming'
+          ? { ...f, incoming: updateList(f.incoming) }
+          : { ...f, outgoing: updateList(f.outgoing) };
+      }));
+      setToast(`Updated ${firmModalType} payment for ${firms[firmModalIdx]?.name}`);
+    } else {
+      const tx = {
+        id: `FTX-${Date.now()}`,
+        amount: cleanAmount,
+        date: firmTxForm.date,
+        time: firmTxForm.time,
+        remark: cleanRemark,
+        method: firmTxForm.method,
+        paidTo: cleanPaidTo,
+        createdAt: new Date().toISOString(),
+      };
+      setFirms(prev => prev.map((f, i) => {
+        if (i !== firmModalIdx) return f;
+        return firmModalType === 'incoming'
+          ? { ...f, incoming: [tx, ...f.incoming] }
+          : { ...f, outgoing: [tx, ...f.outgoing] };
+      }));
+      setToast(`${firmModalType === 'incoming' ? 'Incoming' : 'Outgoing'} payment recorded for ${firms[firmModalIdx]?.name}`);
+    }
+    setFirmModalOpen(false);
+    setEditingTxId(null);
+  }
+  function addNewFirm(e) {
+    e && e.preventDefault();
+    const n = newFirmName.trim();
+    if (!n) return;
+    if (firms.some(f => f.name.toLowerCase() === n.toLowerCase())) {
+      setToast('Firm already exists.');
+      return;
+    }
+    const newId = `FIRM-${String(firms.length + 1).padStart(3, '0')}`;
+    setFirms(prev => [...prev, { id: newId, name: n, incoming: [], outgoing: [] }]);
+    setNewFirmName('');
+    setAddFirmModalOpen(false);
+    setToast(`Firm "${n}" added successfully.`);
+  }
+  function deleteFirmTx(firmIdx, type, txId) {
+    setFirms(prev => prev.map((f, i) => {
+      if (i !== firmIdx) return f;
+      return type === 'incoming'
+        ? { ...f, incoming: f.incoming.filter(t => t.id !== txId) }
+        : { ...f, outgoing: f.outgoing.filter(t => t.id !== txId) };
+    }));
+    setToast('Transaction removed.');
+  }
+  function openEditFirm(idx) {
+    setEditFirmIdx(idx);
+    setEditFirmName(firms[idx].name);
+  }
+  function saveEditFirm(e) {
+    e && e.preventDefault();
+    const n = editFirmName.trim();
+    if (!n) return;
+    if (firms.some((f, i) => i !== editFirmIdx && f.name.toLowerCase() === n.toLowerCase())) {
+      setToast('Another firm with that name already exists.');
+      return;
+    }
+    setFirms(prev => prev.map((f, i) => i === editFirmIdx ? { ...f, name: n } : f));
+    setToast(`Firm renamed to "${n}".`);
+    setEditFirmIdx(null);
+  }
+  function confirmDeleteFirm() {
+    const name = deleteFirmTarget?.name || 'Firm';
+    setFirms(prev => prev.filter((_, i) => i !== firms.indexOf(deleteFirmTarget)));
+    setDeleteFirmTarget(null);
+    if (expandedFirmIdx !== null) setExpandedFirmIdx(null);
+    setToast(`"${name}" deleted.`);
+  }
+
   /* ── Navigation ── */
   const navItems = [
     { label: 'Dashboard', icon: LayoutDashboard },
     { label: 'Add Payment', icon: Plus },
     { label: 'Payment Register', icon: ClipboardList },
+    { label: 'Firms', icon: Building },
     { label: 'People', icon: Users },
     { label: 'Reports', icon: FileText },
     { label: 'Settings', icon: Settings }
@@ -492,7 +676,10 @@ function App() {
               )}
             </button>
             <button className="settings-quick-btn" title="Open Settings" onClick={() => setSettingsOpen(true)}><Settings size={16}/><span>Settings</span></button>
-            <span className="local-badge"><span className="status-dot"></span> Local data</span>
+            <span className="local-badge" title={cloudStatus === 'synced' ? "Data safely synchronized with Firebase Cloud Firestore" : "Connecting to Cloud..."}>
+              <span className={`status-dot ${cloudStatus === 'synced' ? 'online' : ''}`}></span>
+              {cloudStatus === 'synced' ? 'Cloud Synced ☁️' : 'Syncing...'}
+            </span>
             <div className="topbar-divider"></div>
             {currentUser ? (
               <div className="user-profile-widget">
@@ -543,7 +730,7 @@ function App() {
                   <span className="sub-builder-tag">👷 Site Admin</span> {currentUser ? `${currentUser.fullName || currentUser.username}` : 'Administrator'} · Construction Site Finance, Payment Tracking & Contractor Accounts
                 </p>
               </div>
-              <p className="page-desc-text">{activePage === 'Dashboard' ? 'Overview of your construction payments, status & balance (user-editable).' : activePage === 'Payment Register' ? 'Search, review, edit, delete, and toggle status directly with checkboxes.' : activePage === 'People' ? 'Person-wise payment summary (Santosh, Kedar, Yallappa, etc).' : activePage === 'Reports' ? 'Review summaries and export all data directly to Excel.' : 'Overview'}</p>
+              <p className="page-desc-text">{activePage === 'Dashboard' ? 'Overview of your construction payments, status & balance (user-editable).' : activePage === 'Payment Register' ? 'Search, review, edit, delete, and toggle status directly with checkboxes.' : activePage === 'People' ? 'Person-wise payment summary (Santosh, Kedar, Yallappa, etc).' : activePage === 'Reports' ? 'Review summaries and export all data directly to Excel.' : activePage === 'Firms' ? 'Manage firms – track incoming client payments & outgoing labour/partner expenses.' : 'Overview'}</p>
               {payments.length > 0 && (() => {
                 const sortedByUpdate = [...payments].sort((a, b) => {
                   const ta = new Date(a.updatedAt || `${a.date}T${a.time || '10:00'}:00`).getTime();
@@ -644,8 +831,154 @@ function App() {
           </section>
 
           {/* ── Page content ── */}
-          {activePage === 'People' ? (
-            <PeoplePage personTotals={personTotals} query={query} onSearch={setQuery} />
+          {activePage === 'Firms' ? (
+            <section className="panel register-panel">
+              <div className="register-heading">
+                <div>
+                  <h2>Firms</h2>
+                  <p>Manage your construction firms – track incoming client payments &amp; outgoing expenses.</p>
+                </div>
+                <div className="register-actions">
+                  <button className="btn btn-primary" onClick={() => { setNewFirmName(''); setAddFirmModalOpen(true); }}><Plus size={16}/> Add Firm</button>
+                </div>
+              </div>
+
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Firm Name</th>
+                      <th>Total Incoming (₹)</th>
+                      <th>Total Outgoing (₹)</th>
+                      <th>Net Balance (₹)</th>
+                      <th>Transactions</th>
+                      <th className="actions-heading">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {firms.map((firm, idx) => {
+                      const totalIn = firm.incoming.reduce((s, t) => s + Number(t.amount || 0), 0);
+                      const totalOut = firm.outgoing.reduce((s, t) => s + Number(t.amount || 0), 0);
+                      const net = totalIn - totalOut;
+                      const isExpanded = expandedFirmIdx === idx;
+                      return (
+                        <React.Fragment key={firm.id}>
+                          <tr style={{ cursor: 'pointer' }} onClick={() => setExpandedFirmIdx(isExpanded ? null : idx)}>
+                            <td>
+                              <div className="table-person">
+                                <div className="person-avatar small" style={{ background: 'linear-gradient(135deg,#2563eb,#7c3aed)' }}>{initials(firm.name)}</div>
+                                <div>
+                                  <strong>{firm.name}</strong>
+                                  <br/><small style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>{firm.id}</small>
+                                </div>
+                              </div>
+                            </td>
+                            <td><strong className="amount-cell paid-text">{money(totalIn)}</strong></td>
+                            <td><strong className="amount-cell pending-text">{money(totalOut)}</strong></td>
+                            <td><strong className={`amount-cell ${net < 0 ? 'text-red' : ''}`}>{money(net)}</strong></td>
+                            <td><span className="badge-count">{firm.incoming.length + firm.outgoing.length} record{firm.incoming.length + firm.outgoing.length === 1 ? '' : 's'}</span></td>
+                            <td>
+                              <div className="row-actions" onClick={e => e.stopPropagation()}>
+                                <button className="btn btn-primary" style={{ fontSize: '0.72rem', padding: '4px 10px' }} title="Record payment received from client" onClick={() => openFirmTxModal(idx, 'incoming')}>
+                                  <ArrowDownToLine size={13}/> Incoming
+                                </button>
+                                <button className="btn btn-outline" style={{ fontSize: '0.72rem', padding: '4px 10px' }} title="Record payment made to labour/partners" onClick={() => openFirmTxModal(idx, 'outgoing')}>
+                                  <ArrowUpRight size={13}/> Outgoing
+                                </button>
+                                <button className="mini-icon action-view" title="View firm details" onClick={() => setViewFirmIdx(idx)}><Eye size={15}/></button>
+                                <button className="mini-icon action-edit" title="Edit firm name" onClick={() => openEditFirm(idx)}><Pencil size={15}/></button>
+                                <button className="mini-icon action-delete danger" title="Delete firm" onClick={() => setDeleteFirmTarget(firm)}><Trash2 size={15}/></button>
+                              </div>
+                            </td>
+                          </tr>
+                          {isExpanded && (
+                            <tr>
+                              <td colSpan="6" style={{ padding: 0, background: 'var(--bg-card)' }}>
+                                <div style={{ padding: '16px 24px' }}>
+                                  {/* Incoming transactions */}
+                                  <div style={{ marginBottom: '16px' }}>
+                                    <h4 style={{ margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: '6px', color: '#16a34a' }}>
+                                      <ArrowDownToLine size={15}/> Incoming Payments ({firm.incoming.length})
+                                    </h4>
+                                    {firm.incoming.length > 0 ? (
+                                      <div className="table-wrap" style={{ maxHeight: '200px', overflow: 'auto' }}>
+                                        <table>
+                                          <thead><tr><th>Date</th><th>Amount</th><th>Mode</th><th>Remark</th><th>Action</th></tr></thead>
+                                          <tbody>
+                                            {firm.incoming.map(t => (
+                                              <tr key={t.id}>
+                                                <td><span className="date-cell">{formatDate(t.date)}</span> <small className="time-cell">{t.time}</small></td>
+                                                <td><strong className="amount-cell paid-text">{money(t.amount)}</strong></td>
+                                                <td><MethodBadge method={t.method}/></td>
+                                                <td>{t.remark || '—'}</td>
+                                                <td>
+                                                  <div className="row-actions" onClick={e => e.stopPropagation()}>
+                                                    <button className="mini-icon action-edit" title="Edit payment details" onClick={() => openFirmTxModal(idx, 'incoming', t)}><Pencil size={14}/></button>
+                                                    <button className="mini-icon action-delete danger" title="Remove" onClick={() => deleteFirmTx(idx, 'incoming', t.id)}><Trash2 size={14}/></button>
+                                                  </div>
+                                                </td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    ) : <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: 0 }}>No incoming payments recorded yet.</p>}
+                                  </div>
+                                  {/* Outgoing transactions */}
+                                  <div>
+                                    <h4 style={{ margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: '6px', color: '#dc2626' }}>
+                                      <ArrowUpRight size={15}/> Outgoing Payments ({firm.outgoing.length})
+                                    </h4>
+                                    {firm.outgoing.length > 0 ? (
+                                      <div className="table-wrap" style={{ maxHeight: '200px', overflow: 'auto' }}>
+                                        <table>
+                                          <thead><tr><th>Date</th><th>Amount</th><th>Mode</th><th>Paid To</th><th>Remark</th><th>Action</th></tr></thead>
+                                          <tbody>
+                                            {firm.outgoing.map(t => (
+                                              <tr key={t.id}>
+                                                <td><span className="date-cell">{formatDate(t.date)}</span> <small className="time-cell">{t.time}</small></td>
+                                                <td><strong className="amount-cell pending-text">{money(t.amount)}</strong></td>
+                                                <td><MethodBadge method={t.method}/></td>
+                                                <td>{t.paidTo || '—'}</td>
+                                                <td>{t.remark || '—'}</td>
+                                                <td>
+                                                  <div className="row-actions" onClick={e => e.stopPropagation()}>
+                                                    <button className="mini-icon action-edit" title="Edit payment details" onClick={() => openFirmTxModal(idx, 'outgoing', t)}><Pencil size={14}/></button>
+                                                    <button className="mini-icon action-delete danger" title="Remove" onClick={() => deleteFirmTx(idx, 'outgoing', t.id)}><Trash2 size={14}/></button>
+                                                  </div>
+                                                </td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    ) : <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: 0 }}>No outgoing payments recorded yet.</p>}
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                    {!firms.length && <tr><td colSpan="6"><EmptyState text="No firms added yet." actionLabel="Add a firm" onAction={() => setAddFirmModalOpen(true)}/></td></tr>}
+                  </tbody>
+                </table>
+              </div>
+              <div className="table-footer"><span>Showing <strong>{firms.length}</strong> firm{firms.length === 1 ? '' : 's'}</span><span className="footer-note"><span className="status-dot"></span> Saved locally in this browser</span></div>
+            </section>
+          ) : activePage === 'People' ? (
+            <PeoplePage
+              personTotals={personTotals}
+              query={query}
+              onSearch={setQuery}
+              onAddPerson={addName}
+              onDeletePerson={(personName) => {
+                removeName(personName);
+                // Also remove payments for this person to fully clear them
+                setPayments(prev => prev.filter(p => p.name.trim().toLowerCase() !== personName.trim().toLowerCase()));
+              }}
+            />
           ) : activePage === 'Reports' ? (
             <section className="reports-grid">
               <div className="panel report-panel">
@@ -841,9 +1174,9 @@ function App() {
                             <td><span className="purpose-cell">{p.remark || '—'}</span></td>
                             <td>
                               <div className="row-actions">
-                                <button className="mini-icon" title="View details" onClick={() => setViewPayment(p)}><Eye size={15}/></button>
-                                <button className="mini-icon" title="Edit payment" onClick={() => openEdit(p)}><Pencil size={15}/></button>
-                                <button className="mini-icon danger" title="Delete payment" onClick={() => setDeleteTarget(p)}><Trash2 size={15}/></button>
+                                <button className="mini-icon action-view" title="View details" onClick={() => setViewPayment(p)}><Eye size={15}/></button>
+                                <button className="mini-icon action-edit" title="Edit payment" onClick={() => openEdit(p)}><Pencil size={15}/></button>
+                                <button className="mini-icon action-delete danger" title="Delete payment" onClick={() => setDeleteTarget(p)}><Trash2 size={15}/></button>
                               </div>
                             </td>
                           </tr>
@@ -887,6 +1220,243 @@ function App() {
       {deleteTarget && <ConfirmModal payment={deleteTarget} onCancel={() => setDeleteTarget(null)} onConfirm={confirmDelete}/>}
       {settingsOpen && <SettingsModal names={names} workTypes={workTypes} newName={newName} setNewName={setNewName} addName={addName} removeName={removeName} newWorkType={newWorkType} setNewWorkType={setNewWorkType} addWorkType={addWorkType} removeWorkType={removeWorkType} budgetInput={budgetInput} setBudgetInput={setBudgetInput} saveBudget={saveBudget} onClose={() => setSettingsOpen(false)} />}
       {showAuthModal && <AuthModal onLoginSuccess={handleLoginSuccess} />}
+      
+      {/* ── Firm Transaction Modal ── */}
+      {firmModalOpen && firmModalIdx !== null && (
+        <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) { setFirmModalOpen(false); setEditingTxId(null); } }}>
+          <section className="modal-card" role="dialog" aria-modal="true">
+            <div className="modal-header">
+              <div>
+                <div className="modal-kicker">
+                  {editingTxId ? 'EDIT RECORD' : (firmModalType === 'incoming' ? 'INCOMING PAYMENT' : 'OUTGOING PAYMENT')}
+                </div>
+                <h2>
+                  {editingTxId
+                    ? (firmModalType === 'incoming' ? 'Edit incoming payment' : 'Edit outgoing payment')
+                    : (firmModalType === 'incoming' ? 'Record payment received' : 'Record payment made')}
+                </h2>
+                <p>Firm: <strong>{firms[firmModalIdx]?.name}</strong></p>
+              </div>
+              <button className="icon-button" onClick={() => { setFirmModalOpen(false); setEditingTxId(null); }} aria-label="Close"><X size={19}/></button>
+            </div>
+            <form onSubmit={saveFirmTx}>
+              <div className="form-grid">
+                <label className="field">
+                  <span>Amount (₹) <b>*</b></span>
+                  <div className="amount-input"><span>₹</span><input type="number" min="0.01" step="0.01" value={firmTxForm.amount} onChange={e => setFirmTxForm(prev => ({ ...prev, amount: e.target.value }))} placeholder="0.00" required/></div>
+                </label>
+                <label className="field">
+                  <span>Payment Mode <b>*</b></span>
+                  <select value={firmTxForm.method} onChange={e => setFirmTxForm(prev => ({ ...prev, method: e.target.value }))}>
+                    {methods.map(m => <option key={m}>{m}</option>)}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Date <b>*</b></span>
+                  <input type="date" value={firmTxForm.date} onChange={e => setFirmTxForm(prev => ({ ...prev, date: e.target.value }))} required/>
+                </label>
+                <label className="field">
+                  <span>Time</span>
+                  <input type="time" value={firmTxForm.time} onChange={e => setFirmTxForm(prev => ({ ...prev, time: e.target.value }))}/>
+                </label>
+                {firmModalType === 'outgoing' && (
+                  <label className="field full">
+                    <span>Paid To (Labour / Watchman / Partner etc.)</span>
+                    <input value={firmTxForm.paidTo} onChange={e => setFirmTxForm(prev => ({ ...prev, paidTo: e.target.value }))} placeholder="e.g. Labour wages, Watchman salary, Partner share..."/>
+                  </label>
+                )}
+                <label className="field full">
+                  <span>Remark</span>
+                  <textarea value={firmTxForm.remark} onChange={e => setFirmTxForm(prev => ({ ...prev, remark: e.target.value }))} placeholder={firmModalType === 'incoming' ? 'e.g. Client payment for Phase 1...' : 'e.g. Weekly labour wages, security charges...'} rows="2" maxLength="500"/>
+                </label>
+              </div>
+              <div className="modal-footer">
+                <span className="required-note"><b>*</b> Required fields</span>
+                <div>
+                  <button type="button" className="btn btn-outline" onClick={() => { setFirmModalOpen(false); setEditingTxId(null); }}>Cancel</button>
+                  <button type="submit" className="btn btn-primary"><Check size={16}/> {editingTxId ? 'Save Changes' : (firmModalType === 'incoming' ? 'Save Incoming' : 'Save Outgoing')}</button>
+                </div>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {/* ── Add Firm Modal ── */}
+      {addFirmModalOpen && (
+        <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setAddFirmModalOpen(false); }}>
+          <section className="modal-card confirm-modal" role="dialog" aria-modal="true" style={{ maxWidth: '420px' }}>
+            <div className="modal-header">
+              <div>
+                <div className="modal-kicker">NEW FIRM</div>
+                <h2>Add a new firm</h2>
+                <p>Enter the firm name below.</p>
+              </div>
+              <button className="icon-button" onClick={() => setAddFirmModalOpen(false)} aria-label="Close"><X size={19}/></button>
+            </div>
+            <form onSubmit={addNewFirm} style={{ padding: '16px 24px' }}>
+              <label className="field" style={{ marginBottom: '16px' }}>
+                <span>Firm Name <b>*</b></span>
+                <input value={newFirmName} onChange={e => setNewFirmName(e.target.value)} placeholder="e.g. ABC Constructions Pvt Ltd" required autoFocus/>
+              </label>
+              <div className="modal-footer" style={{ padding: '12px 0 0' }}>
+                <span></span>
+                <div>
+                  <button type="button" className="btn btn-outline" onClick={() => setAddFirmModalOpen(false)}>Cancel</button>
+                  <button type="submit" className="btn btn-primary"><Plus size={16}/> Add Firm</button>
+                </div>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {/* ── View Firm Modal ── */}
+      {viewFirmIdx !== null && firms[viewFirmIdx] && (() => {
+        const firm = firms[viewFirmIdx];
+        const totalIn = firm.incoming.reduce((s, t) => s + Number(t.amount || 0), 0);
+        const totalOut = firm.outgoing.reduce((s, t) => s + Number(t.amount || 0), 0);
+        const net = totalIn - totalOut;
+        const items = [
+          ['Firm ID', firm.id],
+          ['Firm Name', firm.name],
+          ['Total Incoming', money(totalIn)],
+          ['Total Outgoing', money(totalOut)],
+          ['Net Balance', money(net)],
+          ['Incoming Records', `${firm.incoming.length} transaction${firm.incoming.length === 1 ? '' : 's'}`],
+          ['Outgoing Records', `${firm.outgoing.length} transaction${firm.outgoing.length === 1 ? '' : 's'}`],
+        ];
+        return (
+          <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setViewFirmIdx(null); }}>
+            <section className="modal-card detail-modal" role="dialog" aria-modal="true">
+              <div className="modal-header">
+                <div>
+                  <div className="modal-kicker">FIRM DETAILS</div>
+                  <h2>{firm.name}</h2>
+                  <p>{firm.id}</p>
+                </div>
+                <button className="icon-button" onClick={() => setViewFirmIdx(null)} aria-label="Close"><X size={19}/></button>
+              </div>
+              <div className="detail-amount">
+                <span>Net Balance</span>
+                <strong className={net < 0 ? 'text-red' : ''}>{money(net)}</strong>
+              </div>
+              <div className="detail-list">{items.map(([label, value]) => <div className="detail-row" key={label}><span>{label}</span><strong>{value}</strong></div>)}</div>
+
+              {/* Recent incoming */}
+              {firm.incoming.length > 0 && (
+                <div style={{ padding: '0 24px 12px' }}>
+                  <h4 style={{ margin: '8px 0', color: '#16a34a', display: 'flex', alignItems: 'center', gap: '6px' }}><ArrowDownToLine size={14}/> Incoming Transactions ({firm.incoming.length})</h4>
+                  <div className="table-wrap" style={{ maxHeight: '180px', overflow: 'auto', marginBottom: '8px' }}>
+                    <table>
+                      <thead><tr><th>Date</th><th>Amount</th><th>Mode</th><th>Remark</th><th>Action</th></tr></thead>
+                      <tbody>
+                        {firm.incoming.map(t => (
+                          <tr key={t.id}>
+                            <td><span className="date-cell">{formatDate(t.date)}</span> <small className="time-cell">{t.time}</small></td>
+                            <td><strong className="amount-cell paid-text">{money(t.amount)}</strong></td>
+                            <td><MethodBadge method={t.method}/></td>
+                            <td>{t.remark || '—'}</td>
+                            <td>
+                              <div className="row-actions">
+                                <button className="mini-icon action-edit" title="Edit payment details" onClick={() => { setViewFirmIdx(null); openFirmTxModal(viewFirmIdx, 'incoming', t); }}><Pencil size={13}/></button>
+                                <button className="mini-icon action-delete danger" title="Remove" onClick={() => deleteFirmTx(viewFirmIdx, 'incoming', t.id)}><Trash2 size={13}/></button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              {/* Recent outgoing */}
+              {firm.outgoing.length > 0 && (
+                <div style={{ padding: '0 24px 12px' }}>
+                  <h4 style={{ margin: '8px 0', color: '#dc2626', display: 'flex', alignItems: 'center', gap: '6px' }}><ArrowUpRight size={14}/> Outgoing Transactions ({firm.outgoing.length})</h4>
+                  <div className="table-wrap" style={{ maxHeight: '180px', overflow: 'auto', marginBottom: '8px' }}>
+                    <table>
+                      <thead><tr><th>Date</th><th>Amount</th><th>Mode</th><th>Paid To</th><th>Remark</th><th>Action</th></tr></thead>
+                      <tbody>
+                        {firm.outgoing.map(t => (
+                          <tr key={t.id}>
+                            <td><span className="date-cell">{formatDate(t.date)}</span> <small className="time-cell">{t.time}</small></td>
+                            <td><strong className="amount-cell pending-text">{money(t.amount)}</strong></td>
+                            <td><MethodBadge method={t.method}/></td>
+                            <td>{t.paidTo || '—'}</td>
+                            <td>{t.remark || '—'}</td>
+                            <td>
+                              <div className="row-actions">
+                                <button className="mini-icon action-edit" title="Edit payment details" onClick={() => { setViewFirmIdx(null); openFirmTxModal(viewFirmIdx, 'outgoing', t); }}><Pencil size={13}/></button>
+                                <button className="mini-icon action-delete danger" title="Remove" onClick={() => deleteFirmTx(viewFirmIdx, 'outgoing', t.id)}><Trash2 size={13}/></button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              <div className="modal-footer">
+                <span className="required-note">Saved locally</span>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button className="btn btn-outline" onClick={() => setViewFirmIdx(null)}>Close</button>
+                  <button className="btn btn-primary" style={{ background: '#16a34a', borderColor: '#16a34a' }} onClick={() => { const idx = viewFirmIdx; setViewFirmIdx(null); openFirmTxModal(idx, 'incoming'); }}><ArrowDownToLine size={14}/> + Add Incoming</button>
+                  <button className="btn btn-primary" style={{ background: '#dc2626', borderColor: '#dc2626' }} onClick={() => { const idx = viewFirmIdx; setViewFirmIdx(null); openFirmTxModal(idx, 'outgoing'); }}><ArrowUpRight size={14}/> + Add Outgoing</button>
+                  <button className="btn btn-outline" title="Rename firm" onClick={() => { const idx = viewFirmIdx; setViewFirmIdx(null); openEditFirm(idx); }}><Pencil size={13}/> Rename Firm</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        );
+      })()}
+
+      {/* ── Edit Firm Modal ── */}
+      {editFirmIdx !== null && (
+        <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setEditFirmIdx(null); }}>
+          <section className="modal-card confirm-modal" role="dialog" aria-modal="true" style={{ maxWidth: '420px' }}>
+            <div className="modal-header">
+              <div>
+                <div className="modal-kicker">EDIT FIRM</div>
+                <h2>Rename firm</h2>
+                <p>Current: <strong>{firms[editFirmIdx]?.name}</strong></p>
+              </div>
+              <button className="icon-button" onClick={() => setEditFirmIdx(null)} aria-label="Close"><X size={19}/></button>
+            </div>
+            <form onSubmit={saveEditFirm} style={{ padding: '16px 24px' }}>
+              <label className="field" style={{ marginBottom: '16px' }}>
+                <span>Firm Name <b>*</b></span>
+                <input value={editFirmName} onChange={e => setEditFirmName(e.target.value)} placeholder="Enter new firm name" required autoFocus/>
+              </label>
+              <div className="modal-footer" style={{ padding: '12px 0 0' }}>
+                <span></span>
+                <div>
+                  <button type="button" className="btn btn-outline" onClick={() => setEditFirmIdx(null)}>Cancel</button>
+                  <button type="submit" className="btn btn-primary"><Check size={16}/> Save Changes</button>
+                </div>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {/* ── Delete Firm Confirmation Modal ── */}
+      {deleteFirmTarget && (
+        <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setDeleteFirmTarget(null); }}>
+          <section className="modal-card confirm-modal" role="alertdialog" aria-modal="true">
+            <div className="confirm-icon"><Trash2 size={23}/></div>
+            <h2>Delete this firm?</h2>
+            <p>This will permanently remove <strong>{deleteFirmTarget.name}</strong> and all its <strong>{deleteFirmTarget.incoming.length + deleteFirmTarget.outgoing.length}</strong> transaction record{deleteFirmTarget.incoming.length + deleteFirmTarget.outgoing.length === 1 ? '' : 's'} from this browser.</p>
+            <div className="confirm-actions">
+              <button className="btn btn-outline" onClick={() => setDeleteFirmTarget(null)}>Keep firm</button>
+              <button className="btn btn-danger" onClick={confirmDeleteFirm}><Trash2 size={15}/> Delete firm</button>
+            </div>
+          </section>
+        </div>
+      )}
+
       {toast && <div className="toast"><span className="toast-check"><Check size={16}/></span>{toast}<button onClick={() => setToast('')} aria-label="Dismiss notification"><X size={15}/></button></div>}
     </div>
   );
@@ -1354,14 +1924,36 @@ function SettingsModal({ names, workTypes, newName, setNewName, addName, removeN
 }
 
 /* ── People Page ── */
-function PeoplePage({ personTotals, query, onSearch }) {
+function PeoplePage({ personTotals, query, onSearch, onAddPerson, onDeletePerson }) {
+  const [showAddPersonModal, setShowAddPersonModal] = useState(false);
+  const [newPersonInput, setNewPersonInput] = useState('');
+  const [deletePersonTarget, setDeletePersonTarget] = useState(null);
   const filtered = personTotals.filter(p => p.name.toLowerCase().includes(query.toLowerCase()));
+
+  function handleCreatePerson(e) {
+    e.preventDefault();
+    const trimmed = newPersonInput.trim();
+    if (trimmed) {
+      onAddPerson(trimmed);
+      setNewPersonInput('');
+      setShowAddPersonModal(false);
+    }
+  }
+
+  function handleConfirmDelete() {
+    if (deletePersonTarget) {
+      onDeletePerson(deletePersonTarget.name);
+      setDeletePersonTarget(null);
+    }
+  }
+
   return (
     <section className="panel register-panel people-panel">
       <div className="register-heading">
         <div><h2>People & Contractors Summary</h2><p>Person-wise report: "How much paid to Shivappa / Santosh till now?"</p></div>
         <div className="register-actions">
           <div className="inline-search"><Search size={16}/><input value={query} onChange={e => onSearch(e.target.value)} placeholder="Search people..."/></div>
+          <button className="btn btn-primary" onClick={() => setShowAddPersonModal(true)}><Plus size={16}/> Add Person</button>
         </div>
       </div>
       <div className="table-wrap">
@@ -1373,6 +1965,7 @@ function PeoplePage({ personTotals, query, onSearch }) {
               <th>Pending Amount</th>
               <th>Grand Total</th>
               <th>Total Transactions</th>
+              <th className="actions-heading">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1383,13 +1976,73 @@ function PeoplePage({ personTotals, query, onSearch }) {
                 <td><strong className="amount-cell pending-text">{money(p.pending)}</strong></td>
                 <td><strong className="amount-cell">{money(p.paid + p.pending)}</strong></td>
                 <td><span className="badge-count">{p.count} record{p.count === 1 ? '' : 's'}</span></td>
+                <td>
+                  <div className="row-actions" style={{ justifyContent: 'center' }}>
+                    <button
+                      className="mini-icon action-delete danger"
+                      title={`Delete ${p.name}`}
+                      onClick={() => setDeletePersonTarget(p)}
+                    >
+                      <Trash2 size={15}/>
+                    </button>
+                  </div>
+                </td>
               </tr>
             ))}
-            {!filtered.length && <tr><td colSpan="5"><EmptyState text="No people found matching your query."/></td></tr>}
+            {!filtered.length && <tr><td colSpan="6"><EmptyState text="No people found matching your query." actionLabel="Add a person" onAction={() => setShowAddPersonModal(true)}/></td></tr>}
           </tbody>
         </table>
       </div>
       <div className="table-footer"><span><strong>{filtered.length}</strong> unique contractors / people recorded</span></div>
+
+      {/* ── Add Person Modal ── */}
+      {showAddPersonModal && (
+        <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setShowAddPersonModal(false); }}>
+          <section className="modal-card confirm-modal" role="dialog" aria-modal="true" style={{ maxWidth: '420px' }}>
+            <div className="modal-header">
+              <div>
+                <div className="modal-kicker">NEW PERSON</div>
+                <h2>Add Contractor / Person</h2>
+                <p>Add a new person to your registered people list.</p>
+              </div>
+              <button className="icon-button" onClick={() => setShowAddPersonModal(false)} aria-label="Close"><X size={19}/></button>
+            </div>
+            <form onSubmit={handleCreatePerson} style={{ padding: '16px 24px' }}>
+              <label className="field" style={{ marginBottom: '16px' }}>
+                <span>Person / Contractor Name <b>*</b></span>
+                <input value={newPersonInput} onChange={e => setNewPersonInput(e.target.value)} placeholder="e.g. Santosh, Mahesh, Rajesh..." required autoFocus/>
+              </label>
+              <div className="modal-footer" style={{ padding: '12px 0 0' }}>
+                <span></span>
+                <div>
+                  <button type="button" className="btn btn-outline" onClick={() => setShowAddPersonModal(false)}>Cancel</button>
+                  <button type="submit" className="btn btn-primary"><Plus size={16}/> Add Person</button>
+                </div>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {/* ── Delete Person Confirmation Modal ── */}
+      {deletePersonTarget && (
+        <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setDeletePersonTarget(null); }}>
+          <section className="modal-card confirm-modal" role="alertdialog" aria-modal="true">
+            <div className="confirm-icon"><Trash2 size={23}/></div>
+            <h2>Delete this person?</h2>
+            <p>
+              Are you sure you want to remove <strong>{deletePersonTarget.name}</strong>?
+              {deletePersonTarget.count > 0 && (
+                <> This will also remove their <strong>{deletePersonTarget.count}</strong> associated payment record{deletePersonTarget.count === 1 ? '' : 's'}.</>
+              )}
+            </p>
+            <div className="confirm-actions">
+              <button className="btn btn-outline" onClick={() => setDeletePersonTarget(null)}>Cancel</button>
+              <button className="btn btn-danger" onClick={handleConfirmDelete}><Trash2 size={15}/> Delete</button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   );
 }
