@@ -5,41 +5,26 @@ import {
   Lock,
   User,
   Phone,
-  ShieldCheck,
   ArrowRight,
   UserPlus,
   LogIn,
   CheckCircle2,
   AlertCircle,
   Building2,
-  Sparkles
+  Mail
 } from 'lucide-react';
 import './AuthModal.css';
 
 const USERS_STORAGE_KEY = 'buildpay-registered-users-v1';
 const CURRENT_USER_KEY = 'buildpay-current-user-v1';
 
-// Seed default admin account if not existing
-const DEFAULT_ACCOUNTS = [
-  {
-    fullName: 'Builder Admin',
-    username: 'admin',
-    phone: '9876543210',
-    password: 'admin',
-    role: 'Administrator'
-  }
-];
-
+// Initial storage getter
 export function getStoredUsers() {
   try {
     const raw = localStorage.getItem(USERS_STORAGE_KEY);
-    if (!raw) {
-      localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(DEFAULT_ACCOUNTS));
-      return DEFAULT_ACCOUNTS;
-    }
-    return JSON.parse(raw);
+    return raw ? JSON.parse(raw) : [];
   } catch {
-    return DEFAULT_ACCOUNTS;
+    return [];
   }
 }
 
@@ -66,13 +51,9 @@ export default function AuthModal({ onLoginSuccess }) {
   // Mode: 'login' | 'signup'
   const [mode, setMode] = useState('login');
 
-  // Login identifier selection mode: 'username' | 'phone' | 'both'
-  const [loginMethod, setLoginMethod] = useState('username');
-
-  // Form states for login
-  const [loginUsername, setLoginUsername] = useState('admin');
-  const [loginPhone, setLoginPhone] = useState('9876543210');
-  const [loginPassword, setLoginPassword] = useState('admin');
+  // Form states for login (clean, no pre-filled demo data)
+  const [loginIdentifier, setLoginIdentifier] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [showLoginPassword, setShowLoginPassword] = useState(false);
 
   // Form states for signup
@@ -94,23 +75,10 @@ export default function AuthModal({ onLoginSuccess }) {
     setErrorMsg('');
     setSuccessMsg('');
 
-    const users = getStoredUsers();
-
-    if (loginMethod === 'username') {
-      if (!loginUsername.trim()) {
-        setErrorMsg('Please enter your username');
-        return;
-      }
-    } else if (loginMethod === 'phone') {
-      if (!loginPhone.trim()) {
-        setErrorMsg('Please enter your phone number');
-        return;
-      }
-    } else if (loginMethod === 'both') {
-      if (!loginUsername.trim() || !loginPhone.trim()) {
-        setErrorMsg('Please enter both your username and phone number');
-        return;
-      }
+    const identifier = loginIdentifier.trim();
+    if (!identifier) {
+      setErrorMsg('Please enter your username or phone number');
+      return;
     }
 
     if (!loginPassword) {
@@ -118,30 +86,22 @@ export default function AuthModal({ onLoginSuccess }) {
       return;
     }
 
-    // Match credentials
+    const users = getStoredUsers();
+    const cleanPhoneInput = identifier.replace(/\D/g, '');
+
+    // Match by username OR phone number
     const found = users.find((u) => {
       const matchPass = u.password === loginPassword;
       if (!matchPass) return false;
 
-      if (loginMethod === 'username') {
-        return u.username.toLowerCase() === loginUsername.trim().toLowerCase();
-      } else if (loginMethod === 'phone') {
-        const cleanPhone = u.phone.replace(/\D/g, '');
-        const targetCleanPhone = loginPhone.replace(/\D/g, '');
-        return cleanPhone === targetCleanPhone;
-      } else {
-        // both
-        const cleanPhone = u.phone.replace(/\D/g, '');
-        const targetCleanPhone = loginPhone.replace(/\D/g, '');
-        return (
-          u.username.toLowerCase() === loginUsername.trim().toLowerCase() &&
-          cleanPhone === targetCleanPhone
-        );
-      }
+      const matchUser = u.username && u.username.toLowerCase() === identifier.toLowerCase();
+      const matchPhone = cleanPhoneInput && u.phone && u.phone.replace(/\D/g, '') === cleanPhoneInput;
+
+      return matchUser || matchPhone;
     });
 
     if (!found) {
-      setErrorMsg('Invalid login credentials. Please check details or sign up.');
+      setErrorMsg('Invalid username/phone or password. Please check your credentials or create an account.');
       return;
     }
 
@@ -149,7 +109,7 @@ export default function AuthModal({ onLoginSuccess }) {
     setCurrentUser(found);
     setTimeout(() => {
       onLoginSuccess(found);
-    }, 500);
+    }, 450);
   };
 
   // Handle Signup Submit
@@ -163,15 +123,15 @@ export default function AuthModal({ onLoginSuccess }) {
       return;
     }
     if (!signupUsername.trim()) {
-      setErrorMsg('Please choose an admin username');
+      setErrorMsg('Please choose a username');
       return;
     }
-    if (signupUsername.length < 3) {
+    if (signupUsername.trim().length < 3) {
       setErrorMsg('Username must be at least 3 characters');
       return;
     }
     if (!signupPhone.trim()) {
-      setErrorMsg('Please enter your 10-digit phone number');
+      setErrorMsg('Please enter your phone number');
       return;
     }
     const cleanPhone = signupPhone.replace(/\D/g, '');
@@ -180,7 +140,7 @@ export default function AuthModal({ onLoginSuccess }) {
       return;
     }
     if (!signupPassword) {
-      setErrorMsg('Please enter a password');
+      setErrorMsg('Please create a password');
       return;
     }
     if (signupPassword.length < 4) {
@@ -194,16 +154,17 @@ export default function AuthModal({ onLoginSuccess }) {
 
     const users = getStoredUsers();
 
-    // Check duplicate username or phone
+    // Check duplicate username
     const usernameExists = users.some(
-      (u) => u.username.toLowerCase() === signupUsername.trim().toLowerCase()
+      (u) => u.username && u.username.toLowerCase() === signupUsername.trim().toLowerCase()
     );
     if (usernameExists) {
-      setErrorMsg('This username is already registered. Please choose another or login.');
+      setErrorMsg('This username is already taken. Please choose another or log in.');
       return;
     }
 
-    const phoneExists = users.some((u) => u.phone.replace(/\D/g, '') === cleanPhone);
+    // Check duplicate phone
+    const phoneExists = users.some((u) => u.phone && u.phone.replace(/\D/g, '') === cleanPhone);
     if (phoneExists) {
       setErrorMsg('This phone number is already registered. Please log in.');
       return;
@@ -214,18 +175,19 @@ export default function AuthModal({ onLoginSuccess }) {
       username: signupUsername.trim(),
       phone: cleanPhone,
       password: signupPassword,
-      role: 'Administrator'
+      role: 'Administrator',
+      createdAt: new Date().toISOString()
     };
 
     const updatedUsers = [...users, newUser];
     localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(updatedUsers));
 
-    setSuccessMsg('Registration successful! Logging you in...');
+    setSuccessMsg('Account created successfully! Logging you in...');
     setCurrentUser(newUser);
 
     setTimeout(() => {
       onLoginSuccess(newUser);
-    }, 700);
+    }, 500);
   };
 
   return (
@@ -237,9 +199,9 @@ export default function AuthModal({ onLoginSuccess }) {
             <Building2 className="brand-icon" size={26} />
             <span className="brand-dot"></span>
           </div>
-          <h2 className="auth-title">BuildPay Admin Portal</h2>
+          <h2 className="auth-title">BuildPay Portal</h2>
           <p className="auth-subtitle">
-            Secure Construction Finance & Payment Management System
+            Construction Finance & Payment Management System
           </p>
 
           {/* Mode Switch Tabs */}
@@ -254,7 +216,7 @@ export default function AuthModal({ onLoginSuccess }) {
               }}
             >
               <LogIn size={16} />
-              <span>Admin Login</span>
+              <span>Sign In</span>
             </button>
             <button
               type="button"
@@ -266,7 +228,7 @@ export default function AuthModal({ onLoginSuccess }) {
               }}
             >
               <UserPlus size={16} />
-              <span>New User Signup</span>
+              <span>Create Account</span>
             </button>
           </div>
         </div>
@@ -288,103 +250,29 @@ export default function AuthModal({ onLoginSuccess }) {
         {/* ─── LOGIN FORM ─── */}
         {mode === 'login' ? (
           <form className="auth-form" onSubmit={handleLoginSubmit}>
-            <div className="auth-selection-section">
-              <label className="field-label">
-                <span>Select Login Credential:</span>
-                <span className="label-hint">Choose any 1 option</span>
+            <div className="form-group">
+              <label className="input-label" htmlFor="login-identifier">
+                Username or Phone Number
               </label>
-              <div className="credential-options">
-                <button
-                  type="button"
-                  className={`credential-choice-pill ${
-                    loginMethod === 'username' ? 'selected' : ''
-                  }`}
-                  onClick={() => {
-                    setLoginMethod('username');
-                    setErrorMsg('');
-                  }}
-                >
-                  <User size={15} />
-                  <span>Username</span>
-                </button>
-                <button
-                  type="button"
-                  className={`credential-choice-pill ${
-                    loginMethod === 'phone' ? 'selected' : ''
-                  }`}
-                  onClick={() => {
-                    setLoginMethod('phone');
-                    setErrorMsg('');
-                  }}
-                >
-                  <Phone size={15} />
-                  <span>Phone Number</span>
-                </button>
-                <button
-                  type="button"
-                  className={`credential-choice-pill ${
-                    loginMethod === 'both' ? 'selected' : ''
-                  }`}
-                  onClick={() => {
-                    setLoginMethod('both');
-                    setErrorMsg('');
-                  }}
-                >
-                  <ShieldCheck size={15} />
-                  <span>Both (Username & Phone)</span>
-                </button>
+              <div className="input-wrapper">
+                <User className="input-icon" size={18} />
+                <input
+                  id="login-identifier"
+                  type="text"
+                  className="auth-input"
+                  placeholder="Enter your username or mobile number"
+                  value={loginIdentifier}
+                  onChange={(e) => setLoginIdentifier(e.target.value)}
+                  autoComplete="username"
+                  autoFocus
+                />
               </div>
             </div>
 
-            {/* Username Input if applicable */}
-            {(loginMethod === 'username' || loginMethod === 'both') && (
-              <div className="form-group">
-                <label className="input-label" htmlFor="login-username">
-                  Username
-                </label>
-                <div className="input-wrapper">
-                  <User className="input-icon" size={18} />
-                  <input
-                    id="login-username"
-                    type="text"
-                    className="auth-input"
-                    placeholder="Enter admin username (e.g. admin)"
-                    value={loginUsername}
-                    onChange={(e) => setLoginUsername(e.target.value)}
-                    autoComplete="username"
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Phone Input if applicable */}
-            {(loginMethod === 'phone' || loginMethod === 'both') && (
-              <div className="form-group">
-                <label className="input-label" htmlFor="login-phone">
-                  Phone Number
-                </label>
-                <div className="input-wrapper">
-                  <Phone className="input-icon" size={18} />
-                  <input
-                    id="login-phone"
-                    type="tel"
-                    className="auth-input"
-                    placeholder="10-digit phone number (e.g. 9876543210)"
-                    value={loginPhone}
-                    onChange={(e) => setLoginPhone(e.target.value)}
-                    autoComplete="tel"
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Password input with eye toggle functionality */}
             <div className="form-group">
-              <div className="input-label-row">
-                <label className="input-label" htmlFor="login-password">
-                  Password
-                </label>
-              </div>
+              <label className="input-label" htmlFor="login-password">
+                Password
+              </label>
               <div className="input-wrapper">
                 <Lock className="input-icon" size={18} />
                 <input
@@ -408,26 +296,20 @@ export default function AuthModal({ onLoginSuccess }) {
               </div>
             </div>
 
-            <div className="demo-hint-box">
-              <Sparkles size={14} />
-              <span>
-                Default demo: <strong>admin</strong> (Phone: <strong>9876543210</strong>) / Pass: <strong>admin</strong>
-              </span>
-            </div>
-
             <button type="submit" className="auth-primary-btn">
-              <span>Sign In to Admin Portal</span>
+              <span>Sign In</span>
               <ArrowRight size={18} />
             </button>
 
             <div className="auth-footer-prompt">
-              <span>Don't have an admin account?</span>
+              <span>Don't have an account yet?</span>
               <button
                 type="button"
                 className="auth-link-btn"
                 onClick={() => {
                   setMode('signup');
                   setErrorMsg('');
+                  setSuccessMsg('');
                 }}
               >
                 Sign up here
@@ -451,6 +333,7 @@ export default function AuthModal({ onLoginSuccess }) {
                   value={signupFullName}
                   onChange={(e) => setSignupFullName(e.target.value)}
                   autoComplete="name"
+                  autoFocus
                 />
               </div>
             </div>
@@ -466,7 +349,7 @@ export default function AuthModal({ onLoginSuccess }) {
                     id="signup-user"
                     type="text"
                     className="auth-input"
-                    placeholder="e.g. ramesh_admin"
+                    placeholder="Choose a username"
                     value={signupUsername}
                     onChange={(e) => setSignupUsername(e.target.value)}
                     autoComplete="username"
@@ -484,7 +367,7 @@ export default function AuthModal({ onLoginSuccess }) {
                     id="signup-phone"
                     type="tel"
                     className="auth-input"
-                    placeholder="10-digit mobile"
+                    placeholder="10-digit mobile number"
                     value={signupPhone}
                     onChange={(e) => setSignupPhone(e.target.value)}
                     autoComplete="tel"
@@ -493,7 +376,6 @@ export default function AuthModal({ onLoginSuccess }) {
               </div>
             </div>
 
-            {/* Password input with view password eye functionality */}
             <div className="form-group">
               <label className="input-label" htmlFor="signup-password">
                 Password
@@ -504,7 +386,7 @@ export default function AuthModal({ onLoginSuccess }) {
                   id="signup-password"
                   type={showSignupPassword ? 'text' : 'password'}
                   className="auth-input has-eye"
-                  placeholder="Create strong password"
+                  placeholder="Create a strong password"
                   value={signupPassword}
                   onChange={(e) => setSignupPassword(e.target.value)}
                   autoComplete="new-password"
@@ -521,7 +403,6 @@ export default function AuthModal({ onLoginSuccess }) {
               </div>
             </div>
 
-            {/* Confirm Password input with view password eye functionality */}
             <div className="form-group">
               <label className="input-label" htmlFor="signup-confirm-password">
                 Confirm Password
@@ -532,7 +413,7 @@ export default function AuthModal({ onLoginSuccess }) {
                   id="signup-confirm-password"
                   type={showSignupConfirmPassword ? 'text' : 'password'}
                   className="auth-input has-eye"
-                  placeholder="Repeat your password"
+                  placeholder="Re-enter your password"
                   value={signupConfirmPassword}
                   onChange={(e) => setSignupConfirmPassword(e.target.value)}
                   autoComplete="new-password"
@@ -550,21 +431,22 @@ export default function AuthModal({ onLoginSuccess }) {
             </div>
 
             <button type="submit" className="auth-primary-btn">
-              <span>Register Admin Account</span>
+              <span>Create Account</span>
               <ArrowRight size={18} />
             </button>
 
             <div className="auth-footer-prompt">
-              <span>Already registered?</span>
+              <span>Already have an account?</span>
               <button
                 type="button"
                 className="auth-link-btn"
                 onClick={() => {
                   setMode('login');
                   setErrorMsg('');
+                  setSuccessMsg('');
                 }}
               >
-                Sign in directly
+                Sign in here
               </button>
             </div>
           </form>
